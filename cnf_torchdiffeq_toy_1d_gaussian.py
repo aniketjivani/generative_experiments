@@ -27,23 +27,26 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from typing import Union, Callable
+from torch.autograd import grad
+
 # %%
 import seaborn as sns
 
 # %%
 parser = argparse.ArgumentParser()
-parser.add_argument('--adjoint', action='store_true')
+parser.add_argument('--adjoint', action='store_false')
 parser.add_argument('--viz', action='store_true')
 parser.add_argument('--niters', type=int, default=1000)
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--num_samples', type=int, default=512)
-parser.add_argument('--width', type=int, default=64)
-parser.add_argument('--hidden_dim', type=int, default=32)
+parser.add_argument('--width', type=int, default=32)
+parser.add_argument('--hidden_dim', type=int, default=2)
 parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--train_dir', type=str, default=None)
 parser.add_argument('--results_dir', type=str, default="./results_toy_2d")
 parser.add_argument('--problem_dim', type=int, default=1)
-parser.add_argument('--run_model', type=bool, default=False)
+parser.add_argument('--run_model', type=bool, default=True)
 args = parser.parse_args(args=())
 
 # %%
@@ -64,6 +67,22 @@ else:
 device = torch.device('cuda:' + str(args.gpu)
                           if torch.cuda.is_available() else 'cpu')
 device
+
+
+# %%
+def autograd_trace(x_out, x_in, **kwargs):
+    """Standard brute-force means of obtaining trace of the Jacobian, O(d) calls to autograd"""
+    trJ = 0.
+    for i in range(x_in.shape[1]):
+        trJ += grad(x_out[:, i].sum(), x_in, allow_unused=False, create_graph=True)[0][:, i]
+    return trJ
+
+def hutch_trace(x_out, x_in, noise=None, **kwargs):
+    """Hutchinson's trace Jacobian estimator, O(1) call to autograd"""
+    jvp = grad(x_out, x_in, noise, create_graph=True)[0]
+    trJ = torch.einsum('bi,bi->b', jvp, noise)
+
+    return trJ
 
 
 # %%
@@ -148,6 +167,8 @@ class HyperNetwork(nn.Module):
 
         B = params[3 * self.blocksize:].reshape(self.width, 1, 1)
         return [W, B, U]
+    
+    
 
 
 # %%
@@ -171,28 +192,12 @@ def get_batch(num_samples, problem_dim):
 
 
 # %%
-# def get_batch_2(num_samples):
-#     # Define the mean of each gaussian
-#     means = np.array([-3.5, 0.0, 3.5])
-#     # Define the weights for each gaussian
-#     weights = np.array([0.2, 0.2, 0.6])
-#     weights /= np.sum(weights)
-#     # randomly choose a gaussian for each sample
-#     components = np.random.choice(means.size, size=num_samples, p=weights)
-#     # sample from the chosen gaussians
-#     points = np.random.normal(means[components], 1, size=num_samples)
-#     return torch.from_numpy(points).float().view(-1, 1).to(device), 
-# torch.zeros(num_samples, 1).type(torch.float32).to(device)
-
-# %%
 # pts, difft1 = get_batch_2(2000)
 # sns.histplot(pts, kde=True)
 
 # %%
 t0 = 0
-t1 = 10
-
-# %%
+t1 = 1
 
 # %%
 if args.problem_dim == 1:
@@ -284,99 +289,71 @@ if args.run_model:
 
         #     print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
         print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss.item()))
+    #     torch.save(func, "./cnf_torchdiffeq_toy_1d_gaussian.pt")
 else:
+    sd = torch.load("./cnf_torchdiffeq_toy_1d_gaussian.pt")
     func = CNF(in_out_dim=args.problem_dim, hidden_dim=args.hidden_dim, width=args.width).to(device)
-    func.load_state_dict(torch.load("./ffjord_toy_1d.pt"))
+    func.load_state_dict(sd)
+    #     func.eval()
 
 # %%
 func
 
 # %%
+xfinal, logp_diff_t1_final = get_batch(1000, args.problem_dim)
 
 # %%
-# torch.save(func.state_dict(), "./ffjord_toy_1d.pt")
+z_t_final, logp_diff_t_final = odeint(
+            func,
+            (xfinal, logp_diff_t1_final),
+            #             torch.tensor(np.linspace(t1, t0, 50)).type(torch.float32).to(device),
+            torch.tensor([t1, t0]).type(torch.float32).to(device),
+            atol=1e-5,
+            rtol=1e-5,
+            method='dopri5',
+        )
 
 # %%
-#     def plt_flow_1D(prior_logdensity, transform, ax, npts=1000, title="$q(x)$", device="cpu"):
-#     z = torch.linspace(LOW, HIGH, npts).unsqueeze(1).to(device)
-#     z.requires_grad_(True)
-#     logqz = prior_logdensity(z)
-
-#     z0 = z.clone().detach().requires_grad_(True)
-#     logqz = transform.forward(0, (z0, logqz))[0].detach()
-#     z0 = z0.detach()
-
-#     f, = torch.autograd.grad(logqz.sum(), z0)
-
-#     ax.quiver(z.cpu().numpy(), torch.zeros(npts), f.cpu().numpy(), torch.ones(npts), color='b')
-#     ax.set_title(title)
-
-# fig, ax = plt.subplots(1, 1, figsize=(5, 1))
-# plt_flow_1D(prior_logdensity, transform, ax)
+z_t_final.shape
 
 # %%
-pts, difft1 = get_batch(2000, args.problem_dim)
-sns.histplot(pts, kde=True)
+actual_samples = p_z0.sample_n(1000).detach().numpy()
 
 # %%
-# def visualize_transform(
-#     potential_or_samples, prior_sample, prior_density, transform=None, inverse_transform=None, samples=True, npts=100,
-#     memory=100, device="cpu"
-# ):
-#     """Produces visualization for the model density and samples from the model."""
-#     plt.clf()
-#     ax = plt.subplot(1, 3, 1, aspect="equal")
-#     if samples:
-#         plt_samples(potential_or_samples, ax, npts=npts)
-#     else:
-#         plt_potential_func(potential_or_samples, ax, npts=npts)
+sns.set_style("whitegrid")
 
-#     ax = plt.subplot(1, 3, 2, aspect="equal")
-#     if inverse_transform is None:
-#         plt_flow(prior_density, transform, ax, npts=npts, device=device)
-#     else:
-#         plt_flow_density(prior_density, inverse_transform, ax, npts=npts, memory=memory, device=device)
+sns.histplot(actual_samples, kde=True, color="red", label="Actual")
+sns.histplot(z_t_final.detach().numpy()[1, :, 0], kde=True, color="blue", label="Predicted")
 
-#     ax = plt.subplot(1, 3, 3, aspect="equal")
-#     if transform is not None:
-#         plt_flow_samples(prior_sample, transform, ax, npts=npts, memory=memory, device=device)
+plt.legend(title="Normalization")
 
 # %%
-# def plt_flow_samples(prior_sample, transform, ax, npts=100, memory=100, title="$x ~ q(x)$", device="cpu"):
-#     z = prior_sample(npts * npts, 2).type(torch.float32).to(device)
-#     zk = []
-#     inds = torch.arange(0, z.shape[0]).to(torch.int64)
-#     for ii in torch.split(inds, int(memory**2)):
-#         zk.append(transform(z[ii]))
-#     zk = torch.cat(zk, 0).cpu().numpy()
-#     ax.hist2d(zk[:, 0], zk[:, 1], range=[[LOW, HIGH], [LOW, HIGH]], bins=npts)
-#     ax.invert_yaxis()
-#     ax.get_xaxis().set_ticks([])
-#     ax.get_yaxis().set_ticks([])
-#     ax.set_title(title)
+# sns.set_style("whitegrid")
+# fig = plt.figure(figsize=(6, 6))
+
+# ax=fig.add_subplot()
+# ax.plot(np.linspace(t1, t0, 50), z_t_final[:, :, 0].detach().cpu().numpy())
+# ax.set_xlabel("t")
+# ax.set_ylabel("z")
 
 # %%
-# LOW = -4
-# HIGH = 4
+# Generate some data
+import matplotlib.cm as cm
+x = np.linspace(0, 10, 1000)
+y = np.sin(x)
 
+# Create a colormap
+c = cm.jet((y-y.min())/y.ptp())
 
-# def plt_potential_func(potential, ax, npts=100, title="$p(x)$"):
-#     """
-#     Args:
-#         potential: computes U(z_k) given z_k
-#     """
-#     xside = np.linspace(LOW, HIGH, npts)
-#     yside = np.linspace(LOW, HIGH, npts)
-#     xx, yy = np.meshgrid(xside, yside)
-#     z = np.hstack([xx.reshape(-1, 1), yy.reshape(-1, 1)])
+# Create a scatter plot with a color for each point
+sc = plt.scatter(x, y, c=y, cmap='jet', s=10, linewidth=0)
 
-#     z = torch.Tensor(z)
-#     u = potential(z).cpu().numpy()
-#     p = np.exp(-u).reshape(npts, npts)
+# Add a colorbar
+plt.colorbar(sc)
 
-#     plt.pcolormesh(xx, yy, p)
-#     ax.invert_yaxis()
-#     ax.get_xaxis().set_ticks([])
-#     ax.get_yaxis().set_ticks([])
-#     ax.set_title(title)
+# Connect the points with a line
+plt.plot(x, y, color='black', linewidth=0.5, alpha=0.5)
 
+# %%
+# pts, difft1 = get_batch(2000, args.problem_dim)
+# sns.histplot(pts, kde=True)
