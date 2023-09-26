@@ -213,7 +213,6 @@ class CNF_plain(nn.Module):
         self.net = net
         self.trace_estimator = trace_estimator if trace_estimator is not None else trace_df_dz
         self.noise_dist = noise_dist
-        # self.integration_time = integration_time
 
     @property
     def nfe(self):
@@ -232,23 +231,52 @@ class CNF_plain(nn.Module):
 
         with torch.set_grad_enabled(True):
             z.requires_grad_(True)
-            # dz_dt = self.net(t, z.view(-1)).view(batchsize, 1)
             dz_dt = self.net(t, z).view(batchsize, 1)
             
-
-            # if self.trace_estimator is not None:
-                # noise = self.noise_dist.sample((batchsize, z.shape[1]))
-                # noise = noise.to(z.device)
-                # dlogp_z_dt = self.trace_estimator(dz_dt, z, noise=noise).view(batchsize, 1)
-            # else:
-                # dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
-
             dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
 
-            # z_t, logp_diff_t = odeint(self.net, (dz_dt, dlogp_z_dt), self.integration_time.type(torch.float32).to(device), method='dopri5', atol=1e-5, rtol=1e-5)
-
         return (dz_dt, dlogp_z_dt)
-        # return z_t, logp_diff_t
+
+
+# %%
+class CNF_regularized(nn.Module):
+    """
+    CNF with regularization on the kinetic energy or the Jacobian. for now we still use exact trace.
+    """
+    def __init__(self, 
+                 net:nn.Module, 
+                 trace_estimator:Union[Callable, None]=None, 
+                 noise_dist=None,
+                 ):
+        super(CNF_regularized, self).__init__()
+        self.net = net
+        self.trace_estimator = trace_estimator if trace_estimator is not None else trace_df_dz
+        self.noise_dist = noise_dist
+        self.regularization_fns = regularization_fns
+
+    @property
+    def nfe(self):
+        return self.net.nfe
+
+    @nfe.setter
+    def nfe(self, value):
+        self.net.nfe = value
+
+    def forward(self, t, states):
+        z = states[0]
+        logp_z = states[1]
+
+        batchsize = z.shape[0]
+
+        with torch.set_grad_enabled(True):
+            z.requires_grad_(True)
+            dz_dt = self.net(t, z).view(batchsize, 1)
+            
+            dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
+
+            reg_states = tuple(reg_fn(z, logp_z, dz_dt, dlogp_z_dt) for reg_fn in self.regularization_fns)
+
+        return (dz_dt, dlogp_z_dt) + reg_states
 
 
 # %%
@@ -280,6 +308,7 @@ my_net
 
 # %%
 my_cnf_plain = CNF_plain(my_net).to(device)
+my_cnf_reg = CNF_regularized(my_net).to(device)
 
 # %%
 for name, param in my_cnf_plain.named_parameters():
@@ -295,6 +324,29 @@ p_z0 = torch.distributions.Normal(
         )
 
 # %%
+# x1, logp_diff_t1 = get_batch(args.num_samples)
+# tt = 0.5
+# with torch.set_grad_enabled(True):
+#     x1.requires_grad_(True)
+#     dz_dt = my_net(tt, x1).view(1000, 1)
+#     dlogp_z_dt = -trace_df_dz(dz_dt, x1).view(1000, 1)
+
+# # logp_diff_t1 is all zeros as it should be.
+# # dz_dt.shape, dlogp_z_dt.shape # (1000, 1), (1000, 1)
+
+# reg1 = reg_lib.l2_regularzation_fn(x1, logp_diff_t1, dz_dt, dlogp_z_dt)
+# reg1
+
+# reg2 = reg_lib.jacobian_frobenius_regularization_fn(x1, logp_diff_t1, dz_dt, dlogp_z_dt)
+# reg2
+
+# reg1, reg2
+
+# all_states = odeint(my_cnf_reg, (x1, logp_diff_t1) + tuple(torch.tensor(0.) for _ in range(len(regularization_coeffs))), torch.Tensor([1, 0]).float().to(device))
+
+# all_states[2:]
+
+# %%
 logger = utils.get_logger(logpath=os.path.join(os.getcwd(), "logs", "cnf_ffjord_toy_1d_gaussian.log"))
 
 # %%
@@ -306,18 +358,36 @@ for itr in range(1, args.niters + 1):
     optimizer.zero_grad()
 
     x, logp_diff_t1 = get_batch(args.num_samples)
-    z_t, logp_diff_t = odeint(my_cnf_plain, 
-                              (x, logp_diff_t1), 
-                              torch.Tensor([1, 0]).float().to(device), 
-                              method='dopri5', 
-                              atol=1e-5, 
-                              rtol=1e-5)
+
+    reg_states_init = tuple(torch.tensor(0.) for _ in range(len(regularization_coeffs)))
+
+    all_states  = odeint(my_cnf_reg, 
+                        (x, logp_diff_t1) + reg_states_init, 
+                        torch.Tensor([1, 0]).float().to(device), 
+                        method='dopri5', 
+                        atol=1e-5, 
+                        rtol=1e-5)
+
+    z_t, logp_diff_t = all_states[0], all_states[1]
+    reg_states_final = all_states[2:]
 
     z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
 
     logp_x = p_z0.log_prob(z_t0).to(device).view(-1) - logp_diff_t0.view(-1) # evaluate change of variables
 
     loss = torch.mean(-logp_x)
+
+    reg_loss = sum(reg_state[-1] * coeff for reg_state, coeff in zip(reg_states_final, regularization_coeffs) if coeff != 0)
+
+    loss = loss + reg_loss
+
+    # # from https://github.com/rtqichen/ffjord/blob/master/train_toy.py
+
+    # if len(regularization_coeffs) > 0:
+    #     reg_states = get_regularization(model, regularization_coeffs)
+    #     reg_loss = sum(reg_state * coeff for reg_state, coeff in zip(reg_states, regularization_coeffs) if coeff != 0)
+            
+    #     loss = loss + reg_loss
 
     nfe_forward = my_cnf_plain.nfe
     my_cnf_plain.nfe = 0

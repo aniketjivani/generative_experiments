@@ -1,3 +1,5 @@
+# MODIFIED FROM THE ORIGINAL: 
+# https://github.com/rtqichen/ffjord/blob/master/lib/layers/wrappers/cnf_regularization.py (getting rid of the context in the reg functions)
 import torch
 import torch.nn as nn
 
@@ -42,7 +44,7 @@ def l1_regularzation_fn(x, logp, dx, dlogp, unused_context):
     return torch.mean(torch.abs(dx))
 
 
-def l2_regularzation_fn(x, logp, dx, dlogp, unused_context):
+def l2_regularzation_fn(x, logp, dx, dlogp):
     del x, logp, dlogp
     return _batch_root_mean_squared(dx)
 
@@ -53,13 +55,10 @@ def directional_l2_regularization_fn(x, logp, dx, dlogp, unused_context):
     return _batch_root_mean_squared(directional_dx)
 
 
-def jacobian_frobenius_regularization_fn(x, logp, dx, dlogp, context):
+def jacobian_frobenius_regularization_fn(x, logp, dx, dlogp):
     del logp, dlogp
-    if hasattr(context, "jac"):
-        jac = context.jac
-    else:
-        jac = _get_minibatch_jacobian(dx, x)
-        context.jac = jac
+    jac = _get_minibatch_jacobian(dx, x)
+    # context.jac = jac
     return _batch_root_mean_squared(jac)
 
 
