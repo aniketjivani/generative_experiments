@@ -55,11 +55,11 @@ parser.add_argument("--adjoint", action="store_false")
 
 parser.add_argument('--l2int', 
                     type=float, 
-                    default=0.01, 
+                    default=0.1, 
                     help="int_t ||f||_2")
 parser.add_argument('--JFrobint', 
                     type=float, 
-                    default=0.01, 
+                    default=0.1, 
                     help="int_t ||df/dx||_F")
 parser.add_argument('--num_samples', type=int, default=1000, help="number of samples")
 
@@ -68,7 +68,8 @@ parser.add_argument('--dl2int', type=float, default=None, help="int_t ||f^T df/d
 parser.add_argument('--JdiagFrobint', type=float, default=None, help="int_t ||df_i/dx_i||_F")
 parser.add_argument('--JoffdiagFrobint', type=float, default=None, help="int_t ||df/dx - df_i/dx_i||_F")
 
-parser.add_argument('--niters', type=int, default=400, help="number of iterations")
+parser.add_argument('--niters', type=int, default=1200, help="number of iterations")
+parser.add_argument('--use_reg', type=bool, default=True)
 
 args = parser.parse_args(args=())
 
@@ -164,11 +165,14 @@ def get_batch(num_samples):
     means = np.array([-3.5, 0.0, 3.5])
     # Define the weights for each gaussian
     weights = np.array([0.2, 0.2, 0.6])
+    
+    scales = np.array([1.5, 0.6, 0.6])
+    
     weights /= np.sum(weights)
     # randomly choose a gaussian for each sample
     components = np.random.choice(means.size, size=num_samples, p=weights)
     # sample from the chosen gaussians
-    points = np.random.normal(means[components], 1, size=num_samples)
+    points = np.random.normal(means[components], scales[components], size=num_samples)
     return torch.from_numpy(points).float().view(-1, 1).to(device), torch.zeros(num_samples, 1).type(torch.float32).to(device)
 
 
@@ -182,7 +186,7 @@ class ODEfunc(nn.Module):
         self.nl = nonlinear
         self.fc1 = nn.Linear(dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        #         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.fc4 = nn.Linear(hidden_dim, dim)
         self.nfe = 0
 
@@ -192,8 +196,8 @@ class ODEfunc(nn.Module):
         out = self.nl(out)
         out = self.fc2(out)
         out = self.nl(out)
-        out = self.fc3(out)
-        out = self.nl(out)
+        #         out = self.fc3(out)
+        #         out = self.nl(out)
         out = self.fc4(out)
         return out
 
@@ -315,12 +319,15 @@ for name, param in my_cnf_plain.named_parameters():
     print(name, param.shape)
 
 # %%
-optimizer = optim.Adam(my_cnf_plain.parameters(), lr=1e-3)
+if args.use_reg:
+    optimizer = optim.Adam(my_cnf_reg.parameters(), lr=1e-3)
+else:
+    optimizer = optim.Adam(my_cnf_plain.parameters(), lr=1e-3)
 
 # %%
 p_z0 = torch.distributions.Normal(
     loc=torch.tensor(0.0).to(device),
-    scale=torch.tensor(1.0).to(device)
+    scale=torch.tensor(3.0).to(device)
         )
 
 # %%
@@ -359,48 +366,68 @@ for itr in range(1, args.niters + 1):
 
     x, logp_diff_t1 = get_batch(args.num_samples)
 
-    reg_states_init = tuple(torch.tensor(0.) for _ in range(len(regularization_coeffs)))
+    if args.use_reg:
+        reg_states_init = tuple(torch.tensor(0.) for _ in range(len(regularization_coeffs)))
+        all_states  = odeint(my_cnf_reg, 
+                            (x, logp_diff_t1) + reg_states_init, 
+                            torch.Tensor([1, 0]).float().to(device), 
+                            method='dopri5', 
+                            atol=1e-5, 
+                            rtol=1e-5)
 
-    all_states  = odeint(my_cnf_reg, 
-                        (x, logp_diff_t1) + reg_states_init, 
-                        torch.Tensor([1, 0]).float().to(device), 
-                        method='dopri5', 
-                        atol=1e-5, 
-                        rtol=1e-5)
+        z_t, logp_diff_t = all_states[0], all_states[1]
+        reg_states_final = all_states[2:]
 
-    z_t, logp_diff_t = all_states[0], all_states[1]
-    reg_states_final = all_states[2:]
+        z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
 
-    z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+        logp_x = p_z0.log_prob(z_t0).to(device).view(-1) - logp_diff_t0.view(-1) # evaluate change of variables
 
-    logp_x = p_z0.log_prob(z_t0).to(device).view(-1) - logp_diff_t0.view(-1) # evaluate change of variables
+        loss = torch.mean(-logp_x)
+        reg_loss = sum(reg_state[-1] * coeff for reg_state, coeff in zip(reg_states_final, regularization_coeffs) if coeff != 0)
 
-    loss = torch.mean(-logp_x)
+        loss = loss + reg_loss
 
-    reg_loss = sum(reg_state[-1] * coeff for reg_state, coeff in zip(reg_states_final, regularization_coeffs) if coeff != 0)
+        nfe_forward = my_cnf_reg.nfe
+        my_cnf_reg.nfe = 0
 
-    loss = loss + reg_loss
+        loss.backward()
+        optimizer.step()
 
-    # # from https://github.com/rtqichen/ffjord/blob/master/train_toy.py
+        nfe_backward = my_cnf_reg.nfe
+        my_cnf_reg.nfe = 0
 
-    # if len(regularization_coeffs) > 0:
-    #     reg_states = get_regularization(model, regularization_coeffs)
-    #     reg_loss = sum(reg_state * coeff for reg_state, coeff in zip(reg_states, regularization_coeffs) if coeff != 0)
-            
-    #     loss = loss + reg_loss
+        f_nfe_meter.update(nfe_forward)
+        b_nfe_meter.update(nfe_backward)
+        loss_meter.update(loss.item())
 
-    nfe_forward = my_cnf_plain.nfe
-    my_cnf_plain.nfe = 0
+    else:
+        all_states  = odeint(my_cnf_plain, 
+                            (x, logp_diff_t1), 
+                            torch.Tensor([1, 0]).float().to(device), 
+                            method='dopri5', 
+                            atol=1e-5, 
+                            rtol=1e-5)
 
-    loss.backward()
-    optimizer.step()
+        z_t, logp_diff_t = all_states[0], all_states[1]
 
-    nfe_backward = my_cnf_plain.nfe
-    my_cnf_plain.nfe = 0
+        z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
 
-    f_nfe_meter.update(nfe_forward)
-    b_nfe_meter.update(nfe_backward)
-    loss_meter.update(loss.item())
+        logp_x = p_z0.log_prob(z_t0).to(device).view(-1) - logp_diff_t0.view(-1) # evaluate change of variables
+
+        loss = torch.mean(-logp_x)
+        
+        nfe_forward = my_cnf_plain.nfe
+        my_cnf_plain.nfe = 0
+
+        loss.backward()
+        optimizer.step()
+
+        nfe_backward = my_cnf_plain.nfe
+        my_cnf_plain.nfe = 0
+
+        f_nfe_meter.update(nfe_forward)
+        b_nfe_meter.update(nfe_backward)
+        loss_meter.update(loss.item())
 
 
     logger.info("Iter {:04d} | Loss {:.4f} | NFE-F {:.1f} | NFE-B {:.1f} |".format(
@@ -408,7 +435,7 @@ for itr in range(1, args.niters + 1):
                     ))
 
 # %%
-batch_pred = 50
+batch_pred = 300
 samples_pred = 1000
 time_pred = 100
 xfinal, logp_diff_t1_final = get_batch(samples_pred)
