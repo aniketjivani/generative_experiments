@@ -96,7 +96,10 @@ def bayes_opt_under_uncertainty(n_iter=100, n_batches=1, batch_size=1, delta_ran
         train_x = torch.cat([train_x, new_x])
         train_y_noise = torch.cat([train_y_noise, new_y])
 
-        mll, model = initialize_model(train_x, train_y_noise, model.state_dict())
+        # mll, model = initialize_model(train_x, train_y_noise, model.state_dict())
+
+        # use fantasy model instead?
+        # updated_model = model.get_fantasy_model(new_x, new_y)
 
         # update posterior of the Bayes risk.
         # mu_pos_bayes = integrate(mu_posterior(f)p(delta)ddelta)
