@@ -6,7 +6,8 @@ Done as a first try:
 Continuous Normalizing Flow with Regularized NODE
 Score-based diffusion model for toy problem.
 
-
+Folders:
+EDL - trying toy examples from [A.Amini - Evidential Deep Learning](https://github.com/aamini/evidential-deep-learning/tree/main/evidential_deep_learning)
 
 Near-future Exploration:
 1. Time reversible ODEs - compare with odd functions (x^3) and others (non-reversible) - x^2 + 1. Re-implement in PyTorch since original code is in Keras
