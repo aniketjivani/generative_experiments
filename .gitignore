@@ -2,3 +2,4 @@
 BenchmarkData/
 BenchmarkModels/
 __pycache__
+*.pdf
