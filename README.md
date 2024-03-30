@@ -18,7 +18,7 @@ Folders:
 Near-future Exploration:
 1. Time reversible ODEs. Re-implement in PyTorch since original code doesn't play nice with TF2.0 - https://github.com/inhuh/trs-oden
 
-2. Graph NODES
+2. Graph NODES - also check connections with reversible CNNs - https://arxiv.org/pdf/1905.10484.pdf
 
 3. Check longer time rollouts in time-reversible settings and with graph-based methods.
 
