@@ -3,3 +3,5 @@ BenchmarkData/
 BenchmarkModels/
 __pycache__
 *.pdf
+*~
+iTransformer-main/
