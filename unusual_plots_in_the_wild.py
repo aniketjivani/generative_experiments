@@ -2,6 +2,8 @@
 
 # https://matplotlib.org/stable/gallery/color/named_colors.html
 
+# Also see: https://gist.github.com/aniketjivani/f04b3465c5a19ebd366e0861237e066d
+
 import math
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
